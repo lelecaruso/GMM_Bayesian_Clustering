@@ -1,0 +1,488 @@
+BAYESIAN LEARNING PROJECT - Davide Villani, Emanuele Caruso
+```{r}
+rm(list = ls(all.names = TRUE))
+```
+
+
+```{r}
+install.packages("pheatmap")  
+install.packages("coda")
+```
+
+```{r}
+acidity <-read.csv("acidity.csv")
+acidity=data.frame(acidity)
+hist(acidity[,2],main="acidity with prob",xlab="",probability = TRUE, breaks = 15)
+```
+
+```{r}
+dati = acidity[,2]
+
+# Function to compute variability ratio for given k
+variability_ratio <- function(k, data) {
+  model = kmeans(data, centers = k)
+  wss = model$tot.withinss
+  bss = model$betweenss
+  ratio = wss / (wss + bss)
+  return(ratio)
+}
+
+# Compute variability ratios for k = 1 to 10 clusters
+k_values = 1:10
+ratios = sapply(k_values, variability_ratio, data = dati)
+
+# Plot the ratios
+plot(k_values, ratios, type = "b", pch = 19, col = "blue",
+     xlab = "Number of clusters (k)",
+     ylab = "Variability ratio (WSS / (WSS + BSS))",
+     main = "Variability ratio vs Number of clusters")
+
+# K-means 2 cluster
+model2 = kmeans(acidity[,2], 2)
+
+hist(acidity[,2],
+     main = "Acidity with K-means Clusters",
+     xlab = "Acidity",
+     probability = TRUE,
+     breaks = 15,
+     col = "lightgray")
+points(acidity[,2],            
+       rep(0, length(acidity[,2])),  
+       col = model2$cluster,   
+       pch = 19)  
+
+#K means 3 cluster
+model3 = kmeans(acidity[,2], 3)
+
+hist(acidity[,2],
+     main = "Acidity with K-means Clusters",
+     xlab = "Acidity",
+     probability = TRUE,
+     breaks = 15,
+     col = "lightgray")
+points(acidity[,2],            
+       rep(0, length(acidity[,2])),  
+       col = model3$cluster,   
+       pch = 19)              
+
+
+
+```
+```{r}
+# ============================
+# Bernoulli Model 2 Components  
+# ============================
+
+library(rjags)
+library(coda)
+library(pheatmap)
+
+
+# JAGS Model Definition
+
+model_string <- 
+"model {
+  for (i in 1:N) {
+    z[i] ~ dbern(w)                         # Latent assignment: z  {0,1}
+    cluster[i] <- z[i] + 1                  # Convert z to cluster index  {1,2}
+    y[i] ~ dnorm(mu[cluster[i]], tau[cluster[i]])  # Likelihood with precision tau
+  }
+
+  # Priors on cluster-specific to avoid label switching
+  mu[1]  ~ dnorm(6, 1)  # Informative prior: Cluster 1 
+  mu[2] ~ dnorm(4, 1)  # Informative prior: Cluster 2   (P(z=1))
+
+  for (k in 1:2) {
+    tau[k] ~ dgamma(3, 3)                   # Prior on precision
+    sigma[k] <- 1 / tau[k]           
+  }
+
+  w ~ dbeta(2,2)                           # Prior on mixing proportion
+}"
+
+
+# Data and MCMC Setup
+data_vector <- acidity[, 2]
+num_obs <- length(data_vector)
+data_list <- list(y = data_vector, N = num_obs)
+
+
+#  Sampling settings 
+nit <- 10000                        
+num_chains <- 3                     # Number of MCMC chains
+thin <- 10                       # Thinning to reduce autocorrelation
+burn_in <- 500
+
+#  Set random seed for reproducibility 
+set.seed(123)
+
+#  Create JAGS model 
+model_bernulli <- jags.model(
+  textConnection(model_string),
+  data = data_list,
+  n.chains = num_chains
+)
+
+update(model_bernulli, n.iter = burn_in)
+
+#  Draw samples from the posterior 
+output <- coda.samples(
+  model = model_bernulli,
+  variable.names <- c("mu", "sigma", "w", "z"),
+  n.iter = nit,
+  thin = thin
+)
+
+
+# Trace Plots and Posterior Densities
+
+par(mfrow = c(1, 2))  # One plot per panel
+
+# Trace and density plots for mu[1], mu[2], and w
+plot(output[, "mu[1]"], main = "Traceplot: mu[1]")
+plot(output[, "mu[2]"], main = "Traceplot: mu[2]")
+plot(output[, "sigma[1]"], main = "Traceplot: sigma[1]")
+plot(output[, "sigma[2]"], main = "Traceplot: sigma[2]")
+plot(output[, "w"], main = "Traceplot: w")
+
+
+# Summary of Posterior Samples
+summary_stats <- summary(output)
+print(summary_stats$statistics[1:5, ])
+print(summary_stats$quantiles[1:5, ])
+
+
+```
+
+```{r}
+# ASSIGNMENT PLOTS
+
+# Extract z samples for cluster assignments (0/1, add +1 to get clusters 1 and 2)
+all_chains <- do.call(rbind, lapply(output, as.matrix))
+z_samples <- all_chains[, grep("^z\\[", colnames(all_chains))]
+z_samples_cluster <- z_samples + 1  # convert 0/1 to 1/2
+
+# Number of observations
+T <- ncol(z_samples)
+
+# 1. Posterior probabilities for clusters 1 and 2
+post_prob_cluster1 <- apply(z_samples_cluster, 2, function(x) mean(x == 1))
+post_prob_cluster2 <- 1 - post_prob_cluster1
+
+# 2. Final assignment based on maximum posterior probability
+final_assignment <- ifelse(post_prob_cluster1 > post_prob_cluster2, 1, 2)
+
+# 3. Extract parameter summaries
+summary_stats <- summary(output)$statistics
+mu_estimates <- summary_stats[c("mu[1]", "mu[2]"), "Mean"]
+sigma_estimates <- summary_stats[c("sigma[1]", "sigma[2]"), "Mean"]
+w_estimate <- summary_stats["w", "Mean"]
+
+# Prepare x sequence for density plotting
+x_seq <- seq(min(acidity[,2]), max(acidity[,2]), length.out = 200)
+
+# Compute densities for each cluster weighted by w and (1 - w)
+dens1 <- (1 - w_estimate) * dnorm(x_seq, mu_estimates[1], sigma_estimates[1])
+dens2 <-  (w_estimate)* dnorm(x_seq, mu_estimates[2], sigma_estimates[2])
+total_dens <- dens1 + dens2
+
+# Compute density range for proper y-axis scaling
+hist_data <- hist(acidity[, 2], breaks = 15, plot = FALSE)
+max_density <- max(hist_data$density)
+
+# Set up the plot: histogram first
+hist(acidity[, 2],
+     breaks = 15, freq = FALSE,
+     main = "Bayesian GMM Fit with 1D Cluster Assignments",
+     xlab = "Acidity Value", ylab = "Density",
+     col = rgb(0.8, 0.8, 0.8, 0.5), border = "white",
+     ylim = c(0, max_density * 1.4))  # Add headroom for lines and points
+
+# Add the 1D cluster-colored points
+points(acidity[, 2],
+       rep(max_density * 0.05, length(acidity[, 2])),  # Y-position just above x-axis
+       col = ifelse(final_assignment == 1, "red", "blue"),
+       pch = 19)
+
+# Plot mixture component densities and total density
+x_seq <- seq(min(acidity[, 2]), max(acidity[, 2]), length.out = 200)
+dens1 <- (1 - w_estimate) * dnorm(x_seq, mu_estimates[1], sd = sqrt(sigma_estimates[1]))
+dens2 <-  (w_estimate)* dnorm(x_seq, mu_estimates[2], sd = sqrt(sigma_estimates[2]))
+total_dens <- dens1 + dens2
+
+lines(x_seq, dens1, col = "red", lwd = 2)
+lines(x_seq, dens2, col = "blue", lwd = 2)
+lines(x_seq, total_dens, col = "black", lwd = 3, lty = 2)
+
+# Add a legend
+legend("topright",
+       legend = c("Cluster 1", "Cluster 2", "Mixture Density"),
+       col = c("red", "blue", "black"),
+       lwd = c(2, 2, 3), lty = c(1, 1, 2), pch = c(19, 19, NA),
+       pt.cex = 1.2,
+       bty = "n")
+
+# Plot 3: Posterior probabilities for cluster 1 (per observation)
+plot(1:T, post_prob_cluster1,
+     type = "h", lwd = 2,
+     col = ifelse(post_prob_cluster1 > 0.5, "red", "blue"),
+     main = "Posterior Probabilities",
+     xlab = "Observation Index",
+     ylab = "P(z = 1 | data)",
+     ylim = c(0, 1))
+
+
+# Posterior Cluster Assignment Matrix (Pst)
+combined_samples <- do.call(rbind, lapply(output, as.matrix))
+
+# Extract z-samples: latent cluster indicators
+z_samples <- combined_samples[, grep("^z\\[", colnames(combined_samples))]
+
+# Dimensions
+M <- nrow(z_samples)  
+T <- ncol(z_samples)  
+
+# Compute pairwise posterior probabilities of being in the same cluster
+Pst <- matrix(0, nrow = T, ncol = T)
+for (i in 1:T) {
+  for (j in i:T) {
+    same_cluster <- z_samples[, i] == z_samples[, j]
+    Pst[i, j] <- mean(same_cluster)
+    Pst[j, i] <- Pst[i, j]  # Ensure symmetry
+  }
+}
+
+# Heatmap of Pairwise Probabilities
+sorted_indices <- order(acidity[, 2])
+Pst_sorted <- Pst[sorted_indices, sorted_indices]
+pheatmap(Pst_sorted,
+         main = "Posterior Pairwise Probabilities (Sorted by Acidity)",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("blue", "yellow"))(100),
+         legend = TRUE,
+         legend_breaks = seq(0, 1, 0.2),
+         legend_labels = seq(0, 1, 0.2))
+
+
+```
+
+```{r}
+# ============================================================
+# Categorical-Dirichlet with 3 Clusters
+# ============================================================
+
+#  Load required libraries 
+library(rjags)
+library(coda)
+
+#  Define the model as a string (with Dirichlet prior) 
+model_string <- "
+model {
+  # Likelihood
+  for (i in 1:N) {
+    z[i] ~ dcat(p)
+    y[i] ~ dnorm(mu[z[i]], tau[z[i]])
+  }
+  
+  
+  #To visualize label switching
+  #mu[1] ~ dnorm(5, 1) 
+  #mu[2] ~ dnorm(5, 1) 
+  #mu[3] ~ dnorm(5, 1) 
+  
+  #Correct parameters
+  mu[1] ~ dnorm(3.5, 1) 
+  mu[2] ~ dnorm(5, 1) 
+  mu[3] ~ dnorm(6.5, 1)
+  
+ 
+  # Priors for cluster parameters
+  for (i in 1:H) {
+    tau[i] ~ dgamma(3, 3)           # Prior for precisions
+    sigma[i] <- 1 / tau[i]   
+  }
+
+  # Prior for mixing proportions
+  p ~ ddirich(a)
+}
+"
+
+#  Number of clusters 
+H <- 3
+
+#  Data prep 
+num_obs <- nrow(acidity)           
+a_inf3 <- c(1.5, 4, 3.5)              #Dirichlet prior
+#a <- c(1, 1, 1)              #Dirichlet prior in case of label switching
+dataList_non_inf3 <- list(
+  y = acidity[, 2],
+  N = num_obs,
+  H = H,
+  a = a_inf3
+)
+
+#  Sampling settings 
+nit <- 10000                # Number of  iterations
+num_chains <- 3             # Number of MCMC chains
+thin <- 10                # Thinning to reduce autocorrelation
+burn_in <- 1000
+
+#  Set random seed for reproducibility 
+set.seed(123)
+
+#  Create JAGS model 
+model_non_inf3 <- jags.model(
+  textConnection(model_string),
+  data = dataList_non_inf3,
+  n.chains = num_chains
+)
+
+#  Burn-in 
+update(model_non_inf3, n.iter = burn_in)
+
+#  Draw samples from the posterior 
+output_non_inf3 <- coda.samples(
+  model = model_non_inf3,
+  variable.names = c("mu", "sigma", "z", "p"),
+  n.iter = nit,
+  thin = thin
+)
+
+# Trace and density plots for mu, sigma, and p
+plot(output_non_inf3[, "mu[1]"], main = "Traceplot: mu[1]")
+plot(output_non_inf3[, "mu[2]"], main = "Traceplot: mu[2]")
+plot(output_non_inf3[, "mu[3]"], main = "Traceplot: mu[3]")
+plot(output_non_inf3[, "p[1]"], main = "Traceplot: p1")
+plot(output_non_inf3[, "p[2]"], main = "Traceplot: p2")
+plot(output_non_inf3[, "p[3]"], main = "Traceplot: p3")
+plot(output_non_inf3[, "sigma[1]"], main = "Traceplot: sigma[1]")
+plot(output_non_inf3[, "sigma[2]"], main = "Traceplot: sigma[2]")
+plot(output_non_inf3[, "sigma[3]"], main = "Traceplot: sigma[3]")
+
+summary_stats <- summary(output_non_inf3)
+print(summary_stats$statistics[1:9, ])
+print(summary_stats$quantiles[1:9, ])
+
+
+```
+
+
+```{r}
+# ASSIGNMENT PLOTS
+
+H <- 3  # Number of mixture components
+
+# Extract all z[i] samples
+all_chains <- do.call(rbind, lapply(output_non_inf3, as.matrix))
+z_samples <- all_chains[, grep("^z\\[", colnames(all_chains))]
+
+T <- ncol(z_samples)        # Number of observations
+N_samp <- nrow(z_samples)   # Number of posterior samples
+
+# Posterior probabilities for each cluster
+post_prob_clusters <- sapply(1:H, function(k) {
+  apply(z_samples, 2, function(z_col) mean(z_col == k))
+})
+colnames(post_prob_clusters) <- paste0("Cluster", 1:H)
+
+# Final MAP assignment
+final_assignment <- apply(post_prob_clusters, 1, which.max)
+
+# Extract parameter estimates from posterior summaries
+summary_stats <- summary(output_non_inf3)$statistics
+mu_estimates     <- summary_stats[paste0("mu[", 1:H, "]"), "Mean"]
+sigma_estimates  <- summary_stats[paste0("sigma[", 1:H, "]"), "Mean"]
+p_estimates      <- summary_stats[paste0("p[", 1:H, "]"), "Mean"]
+
+# Compute densities over a sequence of x values
+x_seq <- seq(min(acidity[,2]), max(acidity[,2]), length.out = 200)
+densities <- matrix(0, nrow = length(x_seq), ncol = H)
+for (k in 1:H) {
+  densities[, k] <- p_estimates[k] * dnorm(x_seq, mean = mu_estimates[k], sd = sqrt(sigma_estimates[k]))
+}
+total_dens <- rowSums(densities)
+
+# Get histogram info for scaling
+hist_data <- hist(acidity[, 2], breaks = 15, plot = FALSE)
+max_density <- max(hist_data$density)
+
+# Set cluster colors
+cluster_colors <- c("red", "blue", "green")
+
+# Base plot: histogram
+hist(acidity[, 2],
+     breaks = 15, freq = FALSE,
+     main = "Bayesian GMM (3 Clusters) with 1D Assignments",
+     xlab = "Acidity Value", ylab = "Density",
+     col = rgb(0.8, 0.8, 0.8, 0.5), border = "white",
+     ylim = c(0, max_density * 1.4))
+
+# 1D data points (colored by MAP assignment)
+points(acidity[, 2],
+       rep(max_density * 0.05, length(acidity[, 2])),
+       col = cluster_colors[final_assignment],
+       pch = 19)
+
+# Component densities and total
+for (k in 1:H) {
+  lines(x_seq, densities[, k], col = cluster_colors[k], lwd = 2)
+}
+lines(x_seq, total_dens, col = "black", lwd = 3, lty = 2)
+
+# Legend
+legend("topright",
+       legend = c(paste("Cluster", 1:H), "Mixture"),
+       col = c(cluster_colors, "black"),
+       lwd = c(rep(2, H), 3),
+       lty = c(rep(1, H), 2),
+       pch = c(rep(19, H), NA),
+       pt.cex = 1.2,
+       bty = "n")
+
+library(pheatmap)
+
+# Combine all chains into one matrix
+combined_samples_3 <- do.call(rbind, lapply(output_non_inf3, as.matrix))
+
+# Extract z-samples: latent cluster indicators
+z_samples_3 <- combined_samples_3[, grep("^z\\[", colnames(combined_samples_3))]
+
+# Dimensions
+M <- nrow(z_samples_3)  # Number of posterior samples
+T <- ncol(z_samples_3)  # Number of observations
+
+# Compute pairwise posterior probabilities of being in the same cluster
+Pst_3 <- matrix(0, nrow = T, ncol = T)
+for (i in 1:T) {
+  for (j in i:T) {
+    same_cluster <- z_samples_3[, i] == z_samples_3[, j]
+    Pst_3[i, j] <- mean(same_cluster)
+    Pst_3[j, i] <- Pst_3[i, j]  # Symmetric
+  }
+}
+
+# Optional: Sort by a feature (e.g., acidity[,2]), or hierarchical clustering
+# Example: sort by variable if available
+sorted_indices_3 <- order(acidity[, 2])  # Replace with appropriate feature
+
+# Reorder the matrix
+Pst_3_sorted <- Pst_3[sorted_indices_3, sorted_indices_3]
+
+# Plot heatmap
+pheatmap(Pst_3_sorted,
+         main = "Posterior Pairwise Probabilities (3-Category Clustering)",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("blue", "yellow"))(100),
+         legend = TRUE,
+         legend_breaks = seq(0, 1, 0.2),
+         legend_labels = seq(0, 1, 0.2))
+
+```
+
+
+
+
+
+
